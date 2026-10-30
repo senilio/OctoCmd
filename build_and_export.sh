@@ -1,196 +1,76 @@
 #!/bin/bash
 
-# Build and Export Script for OctoCmd.app
-# This script builds, archives, and exports the macOS app for distribution
+# Build a universal, ad-hoc-signed macOS preview without Apple credentials.
+set -euo pipefail
 
-set -e  # Exit on any error
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ARCHIVE_PATH="$ROOT_DIR/archive/OctoCmd.xcarchive"
+EXPORT_DIR="$ROOT_DIR/export"
+APP_PATH="$EXPORT_DIR/OctoCmd.app"
+VERSION_PATTERN='[0-9]+\.[0-9]+\.[0-9]+'
 
-# Configuration
-PROJECT_NAME="OctoCmd"
-SCHEME_NAME="OctoCmd"
-WORKSPACE_DIR="$(pwd)"
-BUILD_DIR="$WORKSPACE_DIR/build"
-ARCHIVE_DIR="$WORKSPACE_DIR/archive"
-EXPORT_DIR="$WORKSPACE_DIR/export"
-ARCHIVE_PATH="$ARCHIVE_DIR/${PROJECT_NAME}.xcarchive"
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-# Function to print colored output
-print_status() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
 }
 
-print_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
+if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+    TAG="${GITHUB_REF_NAME:-}"
+    [[ "$TAG" =~ ^v${VERSION_PATTERN}$ ]] || die "Release tags must use vMAJOR.MINOR.PATCH (for example v1.0.0)."
+    VERSION="${TAG#v}"
+else
+    VERSION="${VERSION:-1.0.0}"
+fi
+[[ "$VERSION" =~ ^${VERSION_PATTERN}$ ]] || die "VERSION must use MAJOR.MINOR.PATCH."
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
+[[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || die "BUILD_NUMBER must be a positive integer."
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
+# Do not remove previous artifacts until we know a full Xcode is selected.
+xcodebuild -version || die "Full Xcode is required. Install Xcode and select it with xcode-select or DEVELOPER_DIR."
+[[ -f "$ROOT_DIR/OctoCmd.xcodeproj/project.pbxproj" ]] || die "OctoCmd.xcodeproj is missing."
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
+rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR"
+mkdir -p "$ROOT_DIR/archive" "$EXPORT_DIR"
 
-# Function to clean up previous builds
-cleanup() {
-    print_status "Cleaning up previous builds..."
-    rm -rf "$BUILD_DIR"
-    rm -rf "$ARCHIVE_DIR"
-    rm -rf "$EXPORT_DIR"
-    mkdir -p "$BUILD_DIR"
-    mkdir -p "$ARCHIVE_DIR"
-    mkdir -p "$EXPORT_DIR"
-}
+xcodebuild \
+    -project "$ROOT_DIR/OctoCmd.xcodeproj" \
+    -scheme OctoCmd \
+    -configuration Release \
+    -destination 'generic/platform=macOS' \
+    -derivedDataPath "$ROOT_DIR/build/DerivedData" \
+    -archivePath "$ARCHIVE_PATH" \
+    archive \
+    'ARCHS=arm64 x86_64' \
+    ONLY_ACTIVE_ARCH=NO \
+    CODE_SIGN_IDENTITY= \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGNING_ALLOWED=NO \
+    DEVELOPMENT_TEAM= \
+    "MARKETING_VERSION=$VERSION" \
+    "CURRENT_PROJECT_VERSION=$BUILD_NUMBER"
 
-# Function to build and archive
-build_and_archive() {
-    print_status "Building and archiving $PROJECT_NAME..."
-    
-    xcodebuild -project "$PROJECT_NAME.xcodeproj" \
-               -scheme "$SCHEME_NAME" \
-               -configuration Release \
-               -archivePath "$ARCHIVE_PATH" \
-               archive \
-               CODE_SIGN_IDENTITY="" \
-               CODE_SIGNING_REQUIRED=NO \
-               CODE_SIGNING_ALLOWED=NO \
-               DEVELOPMENT_TEAM="" \
-               -quiet
-    
-    if [ $? -eq 0 ]; then
-        print_success "Archive created successfully at: $ARCHIVE_PATH"
-    else
-        print_error "Failed to create archive"
-        exit 1
-    fi
-}
+# An unsigned archive does not need Xcode's distribution export/signing flow.
+ARCHIVED_APP="$ARCHIVE_PATH/Products/Applications/OctoCmd.app"
+[[ -d "$ARCHIVED_APP" ]] || die "Archive does not contain OctoCmd.app."
+ditto "$ARCHIVED_APP" "$APP_PATH"
 
-# Function to export the app
-export_app() {
-    print_status "Exporting .app from archive..."
-    
-    # Create export options plist for copy distribution
-    cat > "$EXPORT_DIR/ExportOptions.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>method</key>
-    <string>mac-application</string>
-    <key>signingStyle</key>
-    <string>manual</string>
-    <key>stripSwiftSymbols</key>
-    <false/>
-</dict>
-</plist>
-EOF
-    
-    xcodebuild -exportArchive \
-               -archivePath "$ARCHIVE_PATH" \
-               -exportPath "$EXPORT_DIR" \
-               -exportOptionsPlist "$EXPORT_DIR/ExportOptions.plist" \
-               -quiet
-    
-    if [ $? -eq 0 ]; then
-        print_success "App exported successfully to: $EXPORT_DIR"
-        
-        # Find the exported app
-        APP_PATH=$(find "$EXPORT_DIR" -name "*.app" -type d | head -n 1)
-        if [ -n "$APP_PATH" ]; then
-            print_success "Exported app location: $APP_PATH"
-            
-            # Get app size
-            APP_SIZE=$(du -sh "$APP_PATH" | cut -f1)
-            print_status "App size: $APP_SIZE"
-            
-            # Create a zip file for easy distribution
-            print_status "Creating zip file for distribution..."
-            cd "$EXPORT_DIR"
-            APP_NAME=$(basename "$APP_PATH")
-            ZIP_NAME="${APP_NAME%.app}_$(date +%Y%m%d_%H%M%S).zip"
-            zip -r "$ZIP_NAME" "$APP_NAME" > /dev/null 2>&1
-            
-            if [ $? -eq 0 ]; then
-                print_success "Zip file created: $EXPORT_DIR/$ZIP_NAME"
-                ZIP_SIZE=$(du -sh "$EXPORT_DIR/$ZIP_NAME" | cut -f1)
-                print_status "Zip size: $ZIP_SIZE"
-            else
-                print_warning "Failed to create zip file, but app export was successful"
-            fi
-            
-            cd "$WORKSPACE_DIR"
-        else
-            print_error "Could not find exported app"
-            exit 1
-        fi
-    else
-        print_error "Failed to export app"
-        exit 1
-    fi
-}
+lipo "$APP_PATH/Contents/MacOS/OctoCmd" -verify_arch arm64
+lipo "$APP_PATH/Contents/MacOS/OctoCmd" -verify_arch x86_64
+[[ "$(plutil -extract CFBundleShortVersionString raw -o - "$APP_PATH/Contents/Info.plist")" == "$VERSION" ]] || die "Archived application version does not match $VERSION."
+[[ "$(plutil -extract CFBundleVersion raw -o - "$APP_PATH/Contents/Info.plist")" == "$BUILD_NUMBER" ]] || die "Archived application build number does not match $BUILD_NUMBER."
 
-# Function to display summary
-show_summary() {
-    echo ""
-    echo "=========================================="
-    print_success "BUILD AND EXPORT COMPLETED SUCCESSFULLY!"
-    echo "=========================================="
-    echo ""
-    print_status "Build artifacts:"
-    echo "  • Archive: $ARCHIVE_PATH"
-    echo "  • Exported app: $EXPORT_DIR"
-    echo ""
-    
-    # Find and display the final app and zip
-    APP_PATH=$(find "$EXPORT_DIR" -name "*.app" -type d | head -n 1)
-    ZIP_PATH=$(find "$EXPORT_DIR" -name "*.zip" | head -n 1)
-    
-    if [ -n "$APP_PATH" ]; then
-        echo "  • App file: $APP_PATH"
-    fi
-    
-    if [ -n "$ZIP_PATH" ]; then
-        echo "  • Distribution zip: $ZIP_PATH"
-    fi
-    
-    echo ""
-    print_status "The app is ready for distribution!"
-    echo ""
-}
+mkdir -p "$APP_PATH/Contents/Resources"
+cp "$ROOT_DIR/LICENSE" "$APP_PATH/Contents/Resources/LICENSE"
+# Seal the complete bundle, including its license. This is not Developer ID signing.
+codesign --force --sign - --timestamp=none "$APP_PATH"
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
-# Main execution
-main() {
-    echo ""
-    echo "=========================================="
-    print_status "BUILDING AND EXPORTING $PROJECT_NAME"
-    echo "=========================================="
-    echo ""
-    
-    # Check if we're in the right directory
-    if [ ! -f "$PROJECT_NAME.xcodeproj/project.pbxproj" ]; then
-        print_error "Could not find $PROJECT_NAME.xcodeproj in current directory"
-        print_error "Please run this script from the project root directory"
-        exit 1
-    fi
-    
-    # Check if xcodebuild is available
-    if ! command -v xcodebuild &> /dev/null; then
-        print_error "xcodebuild command not found. Please install Xcode."
-        exit 1
-    fi
-    
-    cleanup
-    build_and_archive
-    export_app
-    show_summary
-}
+PACKAGE_NAME="OctoCmd-${VERSION}-macos-universal.zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$EXPORT_DIR/$PACKAGE_NAME"
+(
+    cd -- "$EXPORT_DIR"
+    shasum -a 256 "$PACKAGE_NAME" > "$PACKAGE_NAME.sha256"
+)
 
-# Run the main function
-main "$@"
+printf '\nCreated %s\nChecksum: %s\n' "$EXPORT_DIR/$PACKAGE_NAME" "$EXPORT_DIR/$PACKAGE_NAME.sha256"
+printf 'Preview build: ad-hoc signed, not notarized. macOS may block first launch.\n'

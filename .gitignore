@@ -28,8 +28,8 @@ Pods
 
 ### Xcode ###
 build
-*.xcodeproj/*
-!*.xcodeproj/project.pbxproj
-!*.xcworkspace/contents.xcworkspacedata
 archive
 export
+
+# Python build-script tests
+__pycache__/
